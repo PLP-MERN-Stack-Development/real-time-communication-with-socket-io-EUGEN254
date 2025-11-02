@@ -1,80 +1,59 @@
-import express from "express";
-import http from "http";
+import express from "express"
+import "dotenv/config"
+import cors from "cors"
+import http from "http"
+import { connectDb } from "./lib/db.js";
+import userRouter from "./routes/userRoutes.js";
+import messageRouter from "./routes/messageRoutes.js";
 import { Server } from "socket.io";
-import cors from "cors";
 
+
+
+// create express app and HTPP server
 const app = express();
-app.use(cors());
-app.use(express.json());
+const server = http.createServer(app)
 
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-});
+// imitialize socket.io seerver
+export const io = new Server(server,{
+    cors:{origin: "*"}
+})
 
-// Store online users
-let onlineUsers = {}; // { socketId: { username, currentRoom } }
+// store online users
+export const userScoketMap = {}; //userId:socketId
 
-// Socket.io connection
-io.on("connection", (socket) => {
-  console.log("A user connected:", socket.id);
 
-  // Set username
-  socket.on("setUsername", (username) => {
-    socket.username = username;
-    onlineUsers[socket.id] = { username, currentRoom: "global" };
-    socket.join("global");
-    io.to("global").emit("notification", `${username} has joined the global room`);
-    io.emit("onlineUsers", Object.values(onlineUsers));
-  });
+// socket.io connection handler
+io.on("connection", (socket)=>{
+    const userId = socket.handshake.query.userId;
+    console.log("user connect", userId)
+    if(userId) userScoketMap[userId] = socket.id;
 
-  // Join a room
-  socket.on("joinRoom", (roomName) => {
-    if (socket.currentRoom) socket.leave(socket.currentRoom);
-    socket.join(roomName);
-    socket.currentRoom = roomName;
-    io.to(roomName).emit("notification", `${socket.username} has joined ${roomName}`);
-  });
+    // emit online users to all connected clients
+    io.emit("getOnlineUsers", Object.keys(userScoketMap));
 
-  // Global & room messages
-  socket.on("sendMessage", ({ roomName, message }) => {
-    const msg = {
-      sender: socket.username,
-      text: message,
-      timestamp: new Date(),
-    };
-    io.to(roomName).emit("receiveMessage", msg);
-  });
+    socket.on("disconnect", ()=> {
+        console.log("User disconnected");
+        delete userScoketMap[userId]
+        io.emit("getOnlineUsers", Object.keys(userScoketMap));
+    })
+})
 
-  // Typing indicator
-  socket.on("typing", (roomName) => {
-    socket.to(roomName).emit("userTyping", socket.username);
-  });
+// middleware setup
+app.use(express.json({limit: "4mb"}))
+app.use(cors())
 
-  // Private message
-  socket.on("privateMessage", ({ toSocketId, message }) => {
-    const msg = { sender: socket.username, text: message, timestamp: new Date(), private: true };
-    io.to(toSocketId).emit("privateMessage", msg);
-  });
+// routes setup
+app.use("/api/status",(req,res)=>res.send("Server is live"));
+app.use('/api/auth',userRouter)
+app.use('/api/messages',messageRouter)
 
-  // Read receipt
-  socket.on("messageRead", ({ roomName }) => {
-    io.to(roomName).emit("messageRead", { user: socket.username });
-  });
+// connect to mongodb
+await connectDb()
+if(process.env.NODE_ENV !== "production"){
+    const PORT = process.env.PORT || 5000
+    server.listen(PORT, ()=>console.log("Server is running on Port:" +PORT))    
+}
 
-  // Disconnect
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-    const username = onlineUsers[socket.id]?.username;
-    delete onlineUsers[socket.id];
-    io.emit("onlineUsers", Object.values(onlineUsers));
-    if (username && socket.currentRoom) {
-      io.to(socket.currentRoom).emit("notification", `${username} has left`);
-    }
-  });
-});
 
-server.listen(5000, () => console.log("Server running on port 5000"));
+// Export server for vercel
+export default server;
